@@ -266,25 +266,106 @@ class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
 
         # Precompute quantities required for predictions which are independent
         # of actual query points
+        K_lf = self.kernel_l_(self.X_train_[:self.n_l_])
         K = np.vstack((
                     np.hstack(( self.kernel_l_(self.X_train_[:self.n_l_]), 
                                 self.rho * self.kernel_l_(self.X_train_[:self.n_l_], self.X_train_[self.n_l_:]) )),
                     np.hstack(( self.rho * self.kernel_l_(self.X_train_[self.n_l_:], self.X_train_[:self.n_l_]), 
                                 self.rho**2 *self.kernel_l_(self.X_train_[self.n_l_:]) + self.kernel_d_(self.X_train_[self.n_l_:]) ))
                      ))
+        K_lf[np.diag_indices_from(K_lf)] += self.alpha
         K[np.diag_indices_from(K)] += self.alpha
         try:
-            self.L_ = cholesky(K, lower=True)  # Line 2
+            self.L_lf_ = cholesky(K_lf, lower=True)  # Line 2 (lf)
+            self.L_ = cholesky(K, lower=True)  # Line 2 
             # self.L_ changed, self._K_inv needs to be recomputed
             self._K_inv = None
+            self._K_lf_inv = None
         except np.linalg.LinAlgError as exc:
             exc.args = ("The kernel is not returning a "
                         "positive definite matrix. Try gradually "
                         "increasing the 'alpha' parameter of your "
                         "GaussianProcessRegressor estimator.",) + exc.args
             raise
+        self.alpha_lf_ = cho_solve((self.L_lf_, True), y_l)  # Line 3 (Lf)
         self.alpha_ = cho_solve((self.L_, True), self.y_train_)  # Line 3
         return self
+
+    def predict_lf(self, X, return_std=False, return_cov=False):
+        """Predict using the Gaussian process regression model
+
+        We can also predict based on an unfitted model by using the GP prior.
+        In addition to the mean of the predictive distribution, also its
+        standard deviation (return_std=True) or covariance (return_cov=True).
+        Note that at most one of the two can be requested.
+
+        Parameters
+        ----------
+        X : array-like, shape = (n_samples, n_features)
+            Query points where the GP is evaluated
+
+        return_std : bool, default: False
+            If True, the standard-deviation of the predictive distribution at
+            the query points is returned along with the mean.
+
+        return_cov : bool, default: False
+            If True, the covariance of the joint predictive distribution at
+            the query points is returned along with the mean
+
+        Returns
+        -------
+        y_mean : array, shape = (n_samples, [n_output_dims])
+            Mean of predictive distribution a query points
+
+        y_std : array, shape = (n_samples,), optional
+            Standard deviation of predictive distribution at query points.
+            Only returned when return_std is True.
+
+        y_cov : array, shape = (n_samples, n_samples), optional
+            Covariance of joint predictive distribution a query points.
+            Only returned when return_cov is True.
+        """
+        if return_std and return_cov:
+            raise RuntimeError(
+                "Not returning standard deviation of predictions when "
+                "returning full covariance.")
+
+        X = check_array(X)
+
+        if not hasattr(self, "X_train_"):  
+            raise Warning("Unfitted GP error. Call fit method first.")
+        else:  # Predict based on GP posterior
+            K_trans = self.kernel_l_(X, self.X_train_[:self.n_l_])
+            y_mean = K_trans.dot(self.alpha_lf_)  # Line 4 (y_mean = f_star)
+            y_mean = self._y_l_train_mean + y_mean  # undo normal.
+            if return_cov:
+                v = cho_solve((self.L_lf_, True), K_trans.T)  # Line 5
+                y_cov = self.kernel_l_(X) - K_trans.dot(v)  # Line 6
+                return y_mean, y_cov
+            elif return_std:
+                # cache result of K_inv computation
+                if self._K_lf_inv is None:
+                    # compute inverse K_inv of K based on its Cholesky
+                    # decomposition L and its inverse L_inv
+                    L_inv = solve_triangular(self.L_lf_.T,
+                                             np.eye(self.L_lf_.shape[0]))
+                    self._K_lf_inv = L_inv.dot(L_inv.T)
+
+                # Compute variance of predictive distribution
+                y_var = self.kernel_l_.diag(X)
+                y_var -= np.einsum("ij,ij->i",
+                                   np.dot(K_trans, self._K_lf_inv), K_trans)
+
+                # Check if any of the variances is negative because of
+                # numerical issues. If yes: set the variance to 0.
+                y_var_negative = y_var < 0
+                if np.any(y_var_negative):
+                    warnings.warn("Predicted variances smaller than 0. "
+                                  "Setting those variances to 0.")
+                    y_var[y_var_negative] = 0.0
+                return y_mean, np.sqrt(y_var)
+            else:
+                return y_mean
 
     def predict(self, X, return_std=False, return_cov=False):
         """Predict using the Gaussian process regression model
