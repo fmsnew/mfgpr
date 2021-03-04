@@ -1,6 +1,8 @@
-"""Gaussian processes regression. """
+"""Multi-fidelity Gaussian processes regression with co-Kriging. """
+# Author: Nikita Klyuchnikov <fmsnew@gmail.com>
 
-# Authors: Jan Hendrik Metzen <jhm@informatik.uni-bremen.de>
+# This code extends an original scikit-learn GaussianProcessRegressor by
+# Author: Jan Hendrik Metzen <jhm@informatik.uni-bremen.de>
 #
 # License: BSD 3 clause
 
@@ -21,132 +23,13 @@ from sklearn.exceptions import ConvergenceWarning
 
 class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
                                MultiOutputMixin):
-    """Gaussian process regression (GPR).
+    """Multi-fidelity Gaussian process regression (MFGPR) with co-Kriging.
 
     The implementation is based on Algorithm 2.1 of Gaussian Processes
-    for Machine Learning (GPML) by Rasmussen and Williams.
-
-    In addition to standard scikit-learn estimator API,
-    GaussianProcessRegressor:
-
-       * allows prediction without prior fitting (based on the GP prior)
-       * provides an additional method sample_y(X), which evaluates samples
-         drawn from the GPR (prior or posterior) at given inputs
-       * exposes a method log_marginal_likelihood(theta), which can be used
-         externally for other ways of selecting hyperparameters, e.g., via
-         Markov chain Monte Carlo.
-
-    Read more in the :ref:`User Guide <gaussian_process>`.
-
-    .. versionadded:: 0.18
-
-    Parameters
-    ----------
-    kernel : kernel object
-        The kernel specifying the covariance function of the GP. If None is
-        passed, the kernel "1.0 * RBF(1.0)" is used as default. Note that
-        the kernel's hyperparameters are optimized during fitting.
-
-    alpha : float or array-like, optional (default: 1e-10)
-        Value added to the diagonal of the kernel matrix during fitting.
-        Larger values correspond to increased noise level in the observations.
-        This can also prevent a potential numerical issue during fitting, by
-        ensuring that the calculated values form a positive definite matrix.
-        If an array is passed, it must have the same number of entries as the
-        data used for fitting and is used as datapoint-dependent noise level.
-        Note that this is equivalent to adding a WhiteKernel with c=alpha.
-        Allowing to specify the noise level directly as a parameter is mainly
-        for convenience and for consistency with Ridge.
-
-    optimizer : string or callable, optional (default: "fmin_l_bfgs_b")
-        Can either be one of the internally supported optimizers for optimizing
-        the kernel's parameters, specified by a string, or an externally
-        defined optimizer passed as a callable. If a callable is passed, it
-        must have the signature::
-
-            def optimizer(obj_func, initial_theta, bounds):
-                # * 'obj_func' is the objective function to be minimized, which
-                #   takes the hyperparameters theta as parameter and an
-                #   optional flag eval_gradient, which determines if the
-                #   gradient is returned additionally to the function value
-                # * 'initial_theta': the initial value for theta, which can be
-                #   used by local optimizers
-                # * 'bounds': the bounds on the values of theta
-                ....
-                # Returned are the best found hyperparameters theta and
-                # the corresponding value of the target function.
-                return theta_opt, func_min
-
-        Per default, the 'fmin_l_bfgs_b' algorithm from scipy.optimize
-        is used. If None is passed, the kernel's parameters are kept fixed.
-        Available internal optimizers are::
-
-            'fmin_l_bfgs_b'
-
-    n_restarts_optimizer : int, optional (default: 0)
-        The number of restarts of the optimizer for finding the kernel's
-        parameters which maximize the log-marginal likelihood. The first run
-        of the optimizer is performed from the kernel's initial parameters,
-        the remaining ones (if any) from thetas sampled log-uniform randomly
-        from the space of allowed theta-values. If greater than 0, all bounds
-        must be finite. Note that n_restarts_optimizer == 0 implies that one
-        run is performed.
-
-    normalize_y : boolean, optional (default: False)
-        Whether the target values y are normalized, i.e., the mean of the
-        observed target values become zero. This parameter should be set to
-        True if the target values' mean is expected to differ considerable from
-        zero. When enabled, the normalization effectively modifies the GP's
-        prior based on the data, which contradicts the likelihood principle;
-        normalization is thus disabled per default.
-
-    copy_X_train : bool, optional (default: True)
-        If True, a persistent copy of the training data is stored in the
-        object. Otherwise, just a reference to the training data is stored,
-        which might cause predictions to change if the data is modified
-        externally.
-
-    random_state : int, RandomState instance or None, optional (default: None)
-        The generator used to initialize the centers. If int, random_state is
-        the seed used by the random number generator; If RandomState instance,
-        random_state is the random number generator; If None, the random number
-        generator is the RandomState instance used by `np.random`.
-
-    Attributes
-    ----------
-    X_train_ : array-like, shape = (n_samples, n_features)
-        Feature values in training data (also required for prediction)
-
-    y_train_ : array-like, shape = (n_samples, [n_output_dims])
-        Target values in training data (also required for prediction)
-
-    kernel_ : kernel object
-        The kernel used for prediction. The structure of the kernel is the
-        same as the one passed as parameter but with optimized hyperparameters
-
-    L_ : array-like, shape = (n_samples, n_samples)
-        Lower-triangular Cholesky decomposition of the kernel in ``X_train_``
-
-    alpha_ : array-like, shape = (n_samples,)
-        Dual coefficients of training data points in kernel space
-
-    log_marginal_likelihood_value_ : float
-        The log-marginal-likelihood of ``self.kernel_.theta``
-
-    Examples
-    --------
-    >>> from sklearn.datasets import make_friedman2
-    >>> from sklearn.gaussian_process import GaussianProcessRegressor
-    >>> from sklearn.gaussian_process.kernels import DotProduct, WhiteKernel
-    >>> X, y = make_friedman2(n_samples=500, noise=0, random_state=0)
-    >>> kernel = DotProduct() + WhiteKernel()
-    >>> gpr = GaussianProcessRegressor(kernel=kernel,
-    ...         random_state=0).fit(X, y)
-    >>> gpr.score(X, y) # doctest: +ELLIPSIS
-    0.3680...
-    >>> gpr.predict(X[:2,:], return_std=True) # doctest: +ELLIPSIS
-    (array([653.0..., 592.1...]), array([316.6..., 316.6...]))
-
+    for Machine Learning (GPML) by Rasmussen and Williams and extends it to 
+    the multi-fidelity version with co-kriging schema (see e.g. A.I. Forrester, 
+    A. Sóbester, A.J. Keane "Multi-fidelity optimization via surrogate 
+    modelling", 2007).
     """
     def __init__(self, kernel=None, alpha=1e-10,
                  optimizer="fmin_l_bfgs_b", n_restarts_optimizer=0,
@@ -167,10 +50,16 @@ class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
 
         Parameters
         ----------
-        X : array-like, shape = (n_samples, n_features)
+        X_l : array-like, shape = (n_l_samples, n_features)
             Training data
 
-        y : array-like, shape = (n_samples, [n_output_dims])
+        y_l : array-like, shape = (n_l_samples, [n_output_dims])
+            Target values
+
+        X_h : array-like, shape = (n_h_samples, n_features)
+            Training data
+
+        y_h : array-like, shape = (n_h_samples, [n_output_dims])
             Target values
 
         Returns
@@ -287,7 +176,7 @@ class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
                         "increasing the 'alpha' parameter of your "
                         "GaussianProcessRegressor estimator.",) + exc.args
             raise
-        self.alpha_lf_ = cho_solve((self.L_lf_, True), y_l)  # Line 3 (Lf)
+        self.alpha_lf_ = cho_solve((self.L_lf_, True), self.y_train_[:self.n_l_])  # Line 3 (Lf)
         self.alpha_ = cho_solve((self.L_, True), self.y_train_)  # Line 3
         return self
 
@@ -483,7 +372,6 @@ class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
 
         if eval_gradient:
             raise Warning("eval_gradient = True mode is not implemented yet!")
-#             K, K_gradient = kernel(self.X_train_, eval_gradient=True)
         else:
             K = np.vstack((
                             np.hstack(( kernel_l(self.X_train_[:self.n_l_]), 
@@ -514,18 +402,9 @@ class GaussianProcessCoKriging(BaseEstimator, RegressorMixin,
 
         if eval_gradient:  # compare Equation 5.9 from GPML
             raise Warning("eval_gradient = True mode is not implemented yet!")
-#             tmp = np.einsum("ik,jk->ijk", alpha, alpha)  # k: output-dimension
-#             tmp -= cho_solve((L, True), np.eye(K.shape[0]))[:, :, np.newaxis]
-#             # Compute "0.5 * trace(tmp.dot(K_gradient))" without
-#             # constructing the full matrix tmp.dot(K_gradient) since only
-#             # its diagonal is required
-#             log_likelihood_gradient_dims = \
-#                 0.5 * np.einsum("ijl,ijk->kl", tmp, K_gradient)
-#             log_likelihood_gradient = log_likelihood_gradient_dims.sum(-1)
 
         if eval_gradient:
             raise Warning("eval_gradient = True mode is not implemented yet!")
-#             return log_likelihood, log_likelihood_gradient
         else:
             return log_likelihood
 
